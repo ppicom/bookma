@@ -44,24 +44,27 @@ func main() {
 		log.Fatal(err.Error())
 	}
 
-	var errs []error
-	for _, date := range dates {
-		log.Printf("Booking for date: %s\n", date)
+	log.Printf("Next week dates: %v\n", dates)
 
-		// Book the date
-		err = bookClass(client, config, date)
+	rest, saturday := dates[:len(dates)-1], dates[len(dates)-1]
+
+	var errs []error
+	for _, date := range rest {
+		err = bookClass(client, config, date, "1800_60")
 		if err != nil {
 			errs = append(errs, fmt.Errorf("failed to book date: %s, error: %w", date, err))
 		}
 
 		log.Printf("Sleeping for 5 seconds\n")
-		time.Sleep(10 * time.Second) // We don't want to wake the dragon
+		time.Sleep(5 * time.Second) // We don't want to wake the dragon
+	}
+
+	err = bookClass(client, config, saturday, "1100_60")
+	if err != nil {
+		errs = append(errs, fmt.Errorf("failed to book date: %s, error: %w", saturday, err))
 	}
 
 	if len(errs) > 0 {
-		for _, e := range errs {
-			log.Println(e)
-		}
 		log.Fatalf("Failed to book some classes: %v", errors.Join(errs...))
 	}
 
@@ -105,12 +108,12 @@ func nextWeekDates() ([]string, error) {
 	return days, nil
 }
 
-func bookClass(client *http.Client, config AppConfig, date string) error {
+func bookClass(client *http.Client, config AppConfig, date string, timeID string) error {
 	classes, err := getClasses(client, config, date)
 	if err != nil {
 		return err
 	}
-	class, err := findOneAt(classes, "1800_60")
+	class, err := findOneAt(classes, timeID)
 	if err != nil {
 		return err
 	}
