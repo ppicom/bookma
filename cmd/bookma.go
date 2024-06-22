@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/http/cookiejar"
@@ -53,9 +54,11 @@ func main() {
 		}
 	}
 
-	err = errors.Join(errs...)
-	if err != nil {
-		log.Fatalf("Failed to book some classes: %s", err.Error())
+	if len(errs) > 0 {
+		for _, e := range errs {
+			log.Println(e)
+		}
+		log.Fatalf("Failed to book some classes: %v", errors.Join(errs...))
 	}
 
 	log.Println("Successfully booked all classes")
@@ -73,7 +76,6 @@ func spinUpClient(config AppConfig) (*http.Client, error) {
 	u, err := url.Parse(fmt.Sprintf("https://%s", config.AimHarder.Host))
 	if err != nil {
 		return nil, err
-
 	}
 	jar.SetCookies(u, []*http.Cookie{cookie})
 	client := &http.Client{
@@ -109,11 +111,7 @@ func bookClass(client *http.Client, config AppConfig, date string) error {
 	return book(client, config, class)
 }
 
-func getClasses(
-	client *http.Client,
-	config AppConfig,
-	date string,
-) ([]Booking, error) {
+func getClasses(client *http.Client, config AppConfig, date string) ([]Booking, error) {
 	bookingsUrl := fmt.Sprintf(
 		"https://%s/api/bookings?day=%s&box=%s",
 		config.AimHarder.Host,
@@ -130,6 +128,10 @@ func getClasses(
 		return nil, err
 	}
 	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to fetch classes: %s", res.Status)
+	}
 
 	var bookingsResponse BookingsResponse
 	err = json.NewDecoder(res.Body).Decode(&bookingsResponse)
@@ -173,7 +175,22 @@ func book(client *http.Client, config AppConfig, booking Booking) error {
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to book class: %s", res.Status)
+		body, err := io.ReadAll(res.Body)
+		if err != nil {
+			return fmt.Errorf("failed to book class: %s", res.Status)
+		} else {
+			return fmt.Errorf("failed to book class: %s, %s", res.Status, body)
+		}
+	}
+
+	// Check if body contains errorMssg property despite having received a 200
+	var response map[string]interface{}
+	err = json.NewDecoder(res.Body).Decode(&response)
+	if err != nil {
+		return err
+	}
+	if response["errorMssg"] != nil {
+		return fmt.Errorf("failed to book class: %s", response["errorMssg"])
 	}
 
 	return nil
