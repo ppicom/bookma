@@ -4,17 +4,11 @@ FROM golang:1.22.4-alpine
 # Set the working directory inside the container
 WORKDIR /app
 
-# Copy the Go module files first
-COPY go.mod go.sum ./
-
-# Download the Go module dependencies
-RUN go mod download
-
-# Copy the source code into the container
-COPY cmd/bookma.go .
+# Copy everything in the current directory into the container
+COPY . .
 
 # Build the Go application
-RUN go build -o bookma bookma.go
+RUN go build -o bookma ./cmd/bookma.go
 
 # Set environment variables (if needed, these can also be set at runtime)
 # ENV AIMHARDER_HOST=your_host

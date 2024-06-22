@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -52,6 +53,9 @@ func main() {
 		if err != nil {
 			errs = append(errs, fmt.Errorf("failed to book date: %s, error: %w", date, err))
 		}
+
+		log.Printf("Sleeping for 5 seconds\n")
+		time.Sleep(10 * time.Second) // We don't want to wake the dragon
 	}
 
 	if len(errs) > 0 {
@@ -66,8 +70,9 @@ func main() {
 
 func spinUpClient(config AppConfig) (*http.Client, error) {
 	cookie := &http.Cookie{
-		Name:  config.AimHarder.Cookie.Name,
-		Value: config.AimHarder.Cookie.Value,
+		Name:   config.AimHarder.Cookie.Name,
+		Value:  config.AimHarder.Cookie.Value,
+		Domain: config.AimHarder.Host,
 	}
 	jar, err := cookiejar.New(nil)
 	if err != nil {
@@ -79,8 +84,9 @@ func spinUpClient(config AppConfig) (*http.Client, error) {
 	}
 	jar.SetCookies(u, []*http.Cookie{cookie})
 	client := &http.Client{
-		Jar:     jar,
-		Timeout: 1 * time.Minute,
+		Jar:       jar,
+		Timeout:   1 * time.Minute,
+		Transport: &loggingRoundTripper{rt: http.DefaultTransport},
 	}
 	return client, nil
 }
@@ -143,6 +149,8 @@ func getClasses(client *http.Client, config AppConfig, date string) ([]Booking, 
 		bookingsResponse.Bookings[i].Date = date
 	}
 
+	log.Printf("Found %d classes for date: %s\n", len(bookingsResponse.Bookings), date)
+
 	return bookingsResponse.Bookings, nil
 }
 
@@ -160,7 +168,7 @@ func book(client *http.Client, config AppConfig, booking Booking) error {
 		"https://%s/api/book",
 		config.AimHarder.Host,
 	)
-	str := fmt.Sprintf("id=%s&day=%s&insist=0&familyId=", booking.ID, booking.Date)
+	str := fmt.Sprintf("id=%d&day=%s", booking.ID, booking.Date)
 	payload := strings.NewReader(str)
 	req, err := http.NewRequest("POST", bookUrl, payload)
 	if err != nil {
@@ -174,23 +182,15 @@ func book(client *http.Client, config AppConfig, booking Booking) error {
 	}
 	defer res.Body.Close()
 
-	if res.StatusCode != http.StatusOK {
-		body, err := io.ReadAll(res.Body)
-		if err != nil {
-			return fmt.Errorf("failed to book class: %s", res.Status)
-		} else {
-			return fmt.Errorf("failed to book class: %s, %s", res.Status, body)
-		}
-	}
-
 	// Check if body contains errorMssg property despite having received a 200
-	var response map[string]interface{}
+	var response BookingResponse
 	err = json.NewDecoder(res.Body).Decode(&response)
 	if err != nil {
 		return err
 	}
-	if response["errorMssg"] != nil {
-		return fmt.Errorf("failed to book class: %s", response["errorMssg"])
+
+	if res.StatusCode != http.StatusOK || response.ErrorMssg != "" {
+		return fmt.Errorf("failed to book class: %s", response.ErrorMssg)
 	}
 
 	return nil
@@ -201,8 +201,60 @@ type BookingsResponse struct {
 }
 
 type Booking struct {
-	ID        string `json:"id"`
+	ID        int    `json:"id"`
 	TimeID    string `json:"timeid"`
 	ClassName string `json:"className"`
 	Date      string `json:"-"` // I add it to the struct to use it in the book function, not coming from the server.
+}
+
+// Define the struct to match the JSON structure
+type BookingResponse struct {
+	ClasesContratadas string `json:"clasesContratadas"`
+	BookState         int    `json:"bookState"`
+	ErrorMssg         string `json:"errorMssg"`
+	ErrorMssgLang     string `json:"errorMssgLang"`
+}
+
+type loggingRoundTripper struct {
+	rt http.RoundTripper
+}
+
+func (lrt *loggingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Log the request
+	logRequest(req)
+
+	// Perform the request
+	start := time.Now()
+	resp, err := lrt.rt.RoundTrip(req)
+	duration := time.Since(start)
+
+	if err != nil {
+		log.Printf("Request failed: %v", err)
+		return nil, err
+	}
+
+	// Log the response
+	logResponse(resp, duration)
+
+	return resp, nil
+}
+
+func logRequest(req *http.Request) {
+	var bodyBytes []byte
+	if req.Body != nil {
+		bodyBytes, _ = io.ReadAll(req.Body)
+		req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+	}
+	log.Printf("Request: %s %s\nHeaders: %v\nBody: %s\n",
+		req.Method, req.URL, req.Header, string(bodyBytes))
+}
+
+func logResponse(resp *http.Response, duration time.Duration) {
+	var bodyBytes []byte
+	if resp.Body != nil {
+		bodyBytes, _ = io.ReadAll(resp.Body)
+		resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+	}
+	log.Printf("Response: %s\nDuration: %v\nStatus: %d\nHeaders: %v\nBody: %s\n",
+		resp.Request.URL, duration, resp.StatusCode, resp.Header, string(bodyBytes))
 }
