@@ -1,6 +1,6 @@
 module github.com/ppicom/bookma
 
-go 1.22.3
+go 1.22.4
 
 require (
 	github.com/kelseyhightower/envconfig v1.4.0
