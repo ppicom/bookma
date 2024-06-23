@@ -1,108 +1,82 @@
-package main
+package aimharder
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"net/http/cookiejar"
+	"net/url"
 	"strings"
 	"time"
-
-	"github.com/kelseyhightower/envconfig"
-
-	"github.com/ppicom/bookma/internal/aimharder"
 )
 
-type AppConfig struct {
-	AimHarder aimharder.Config
+type Config struct {
+	Host   string `envconfig:"AIMHARDER_HOST" required:"true"`
+	BoxID  string `envconfig:"AIMHARDER_BOX_ID" required:"true"`
+	Cookie struct {
+		Name  string `envconfig:"AIMHARDER_COOKIE_NAME" required:"true"`
+		Value string `envconfig:"AIMHARDER_COOKIE_VALUE" required:"true"`
+	}
+	LogRequests bool `envconfig:"AIMHARDER_LOG_REQUESTS" default:"false"`
 }
 
-func main() {
-	var config AppConfig
-	err := envconfig.Process("AIMHARDER", &config)
-	if err != nil {
-		log.Fatal(err.Error())
-	}
-
-	client, err := aimharder.New(config.AimHarder)
-	if err != nil {
-		log.Fatal(err.Error())
-	}
-
-	dates, err := nextWeekDates()
-	if err != nil {
-		log.Fatal(err.Error())
-	}
-
-	log.Printf("Next week dates: %v\n", dates)
-
-	rest, saturday := dates[:len(dates)-1], dates[len(dates)-1]
-
-	var errs []error
-	err = client.BookClass(config.AimHarder, saturday, "1100_60")
-	if err != nil {
-		errs = append(errs, fmt.Errorf("failed to book date: %s, error: %w", saturday, err))
-	}
-
-	for _, date := range rest {
-		err = client.BookClass(config.AimHarder, date, "1800_60")
-		if err != nil {
-			errs = append(errs, fmt.Errorf("failed to book date: %s, error: %w", date, err))
-		} else {
-			log.Printf("Class booked for date: %s\n", date)
-		}
-
-		log.Printf("Sleeping for 5 seconds\n")
-		time.Sleep(5 * time.Second) // We don't want to wake the dragon
-	}
-
-	if len(errs) > 0 {
-		log.Fatalf("Failed to book some classes: %v", errors.Join(errs...))
-	}
-
-	log.Println("Successfully booked all classes")
+type Client struct {
+	client *http.Client
+	config Config
 }
 
-var now = time.Now
-
-func nextWeekDates() ([]string, error) {
-	var days []string
-	today := now()
-	for ; today.Weekday() != time.Monday; today = today.AddDate(0, 0, 1) {
+func New(config Config) (*Client, error) {
+	cookie := &http.Cookie{
+		Name:   config.Cookie.Name,
+		Value:  config.Cookie.Value,
+		Domain: config.Host,
 	}
-	// Get Monday through Saturday
-	for i := 0; i < 6; i++ {
-		days = append(days, today.AddDate(0, 0, i).Format("20060102"))
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return nil, err
 	}
-	return days, nil
+	u, err := url.Parse(fmt.Sprintf("https://%s", config.Host))
+	if err != nil {
+		return nil, err
+	}
+	jar.SetCookies(u, []*http.Cookie{cookie})
+	client := &http.Client{
+		Jar:       jar,
+		Timeout:   1 * time.Minute,
+		Transport: &loggingRoundTripper{rt: http.DefaultTransport, active: config.LogRequests},
+	}
+	return &Client{
+		client: client,
+		config: config,
+	}, nil
 }
 
-func bookClass(client *http.Client, config AppConfig, date string, timeID string) error {
-	classes, err := getClasses(client, config, date)
+func (cli *Client) BookClass(config Config, date string, timeID string) error {
+	classes, err := cli.getClasses(date)
 	if err != nil {
 		return err
 	}
-	class, err := findOneAt(classes, timeID)
+	class, err := cli.findOneAt(classes, timeID)
 	if err != nil {
 		return err
 	}
-	return book(client, config, class)
+	return cli.book(class)
 }
 
-func getClasses(client *http.Client, config AppConfig, date string) ([]Booking, error) {
+func (cli *Client) getClasses(date string) ([]Booking, error) {
 	bookingsUrl := fmt.Sprintf(
 		"https://%s/api/bookings?day=%s&box=%s",
-		config.AimHarder.Host,
+		cli.config.Host,
 		date,
-		config.AimHarder.BoxID,
+		cli.config.BoxID,
 	)
 	req, err := http.NewRequest("GET", bookingsUrl, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	res, err := client.Do(req)
+	res, err := cli.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +101,7 @@ func getClasses(client *http.Client, config AppConfig, date string) ([]Booking, 
 	return bookingsResponse.Bookings, nil
 }
 
-func findOneAt(bookings []Booking, timeID string) (Booking, error) {
+func (cli *Client) findOneAt(bookings []Booking, timeID string) (Booking, error) {
 	for _, booking := range bookings {
 		if booking.TimeID == timeID {
 			return booking, nil
@@ -136,10 +110,10 @@ func findOneAt(bookings []Booking, timeID string) (Booking, error) {
 	return Booking{}, fmt.Errorf("no class found at %s", timeID)
 }
 
-func book(client *http.Client, config AppConfig, booking Booking) error {
+func (cli *Client) book(booking Booking) error {
 	bookUrl := fmt.Sprintf(
 		"https://%s/api/book",
-		config.AimHarder.Host,
+		cli.config.Host,
 	)
 	str := fmt.Sprintf("id=%d&day=%s", booking.ID, booking.Date)
 	payload := strings.NewReader(str)
@@ -149,7 +123,7 @@ func book(client *http.Client, config AppConfig, booking Booking) error {
 	}
 	req.Header.Add("content-type", "application/x-www-form-urlencoded")
 
-	res, err := client.Do(req)
+	res, err := cli.client.Do(req)
 	if err != nil {
 		return err
 	}
